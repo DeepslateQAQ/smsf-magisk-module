@@ -1,0 +1,7 @@
+id=smsf_webhook
+name=SMS Webhook Forwarder
+version=v1.0.0
+versionCode=10000
+author=smsf
+description=Forwards incoming SMS to any HTTP(S) webhook. SMSForwarder-compatible templates/HMAC, root-based (no app, no default-SMS-app slot), BFU/direct-boot safe, offline queue with retry.
+updateJson=https://raw.githubusercontent.com/DeepslateQAQ/smsf-magisk-module/main/update.json

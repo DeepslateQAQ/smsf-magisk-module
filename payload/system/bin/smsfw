@@ -1,0 +1,16 @@
+#!/system/bin/sh
+# Systemless CLI entry point.
+#
+# This file is mounted into /system/bin by the root solution's module mounting
+# (Magisk Magic Mount, KernelSU/APatch systemless overlay) so `smsfw` is simply
+# on PATH. The implementation stays in /data/adb/smsf, so updating the module
+# never requires touching /system and the mount always points at current code.
+
+SMSF_DATA=${SMSF_DATA:-/data/adb/smsf}
+
+if [ ! -x "$SMSF_DATA/bin/smsfw" ]; then
+    printf 'smsfw: %s/bin/smsfw not found - is the module enabled?\n' "$SMSF_DATA" >&2
+    exit 127
+fi
+
+exec "$SMSF_DATA/bin/smsfw" "$@"

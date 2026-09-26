@@ -1,0 +1,6 @@
+# Extra HTTP headers, one "Name: value" per line. Lines starting with # are kept.
+# Content-Type is auto-detected from the template; uncomment to force it.
+#
+# Content-Type: application/json
+# Authorization: Bearer <token>
+# X-Api-Key: <key>

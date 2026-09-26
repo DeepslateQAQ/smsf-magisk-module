@@ -1,0 +1,47 @@
+#!/bin/sh
+# Fake app_process: runs the same Java payload on a desktop JVM, and mirrors
+# AOSP app_main.cpp argument handling so the harness catches a misordered
+# invocation instead of skipping unknown args and scanning forward:
+#
+#   app_process [vm-options] <parent-dir> [--nice-name=N] <class> [args...]
+#
+# app_main.cpp shifts argv past argv[0], feeds leading '-' args to the VM, skips
+# the unused parent dir with `++i`, then parses --nice-name=/--zygote/... and
+# takes the first remaining non-"--" argument as the class name.
+
+CLASSES="${CLASSPATH:-}"
+
+# 1. VM options (must come first)
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -Djava.class.path=*) CLASSES="${1#-Djava.class.path=}"; shift ;;
+        -*)                  shift ;;
+        *)                   break ;;
+    esac
+done
+
+# 2. parent dir, unused but required
+if [ $# -lt 1 ]; then
+    echo "fake app_process: missing parent-dir argument" >&2
+    exit 1
+fi
+shift
+
+# 3. optional --nice-name= (after the parent dir)
+case "${1:-}" in
+    --nice-name=*) shift ;;
+esac
+
+# 4. class name must be here
+if [ "${1:-}" != "com.smsfw.Main" ]; then
+    echo "fake app_process: class name in unexpected position: '${1:-}'" >&2
+    exit 1
+fi
+shift
+
+if [ -z "$CLASSES" ]; then
+    echo "fake app_process: no classpath" >&2
+    exit 1
+fi
+
+exec java -cp "$CLASSES" com.smsfw.Main "$@"

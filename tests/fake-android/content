@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Stand-in for Android's `content` command (AOSP cmds/content/Content.java).
+
+It mirrors the real CLI contract that the module depends on:
+
+  * it ALWAYS exits 0 - errors are reported in the output, never via $?
+  * one stdout line per row: "Row: <n> <col>=<value>, <col>=<value>"
+  * empty result set: stdout "No result found."
+  * NULL column: the literal string "NULL"
+  * unsupported argument: "usage: ..." + "[ERROR] Unsupported argument: <x>" on stdout
+  * missing column / provider failure: "Error while accessing provider: ..." on stderr
+
+Database (FAKE_SMS_DB):
+  {"messages": [{"_id":1,"address":"10086","body":"hi","date":1700000000000,
+                 "sub_id":1,"service_center":"+8613800000"}],
+   "sims": {"1": {"display_name":"CMCC","slot_index":0}}}
+
+Knobs used by the tests:
+  FAKE_SMS_CALLS      append every invocation to this file
+  FAKE_SMS_HIDE_ITEM  behave as if that message id was deleted (item URI -> no rows)
+"""
+import json
+import os
+import sys
+
+USAGE = ("usage: adb shell content query --uri <URI> [--user <USER_ID>] "
+         "[--projection <PROJECTION>] [--where <WHERE>] [--sort <SORT_ORDER>]\n")
+
+# Columns this fake understands (slot_index is optional per SIM record).
+KNOWN_OPTIONS = ("uri", "projection", "where", "sort")
+
+
+def out(text):
+    sys.stdout.write(text if text.endswith("\n") else text + "\n")
+
+
+def provider_error(msg):
+    """Mirror Command.execute()'s catch block, then exit 0 like the real CLI."""
+    sys.stderr.write("Error while accessing provider:com.android.providers.telephony\n")
+    sys.stderr.write("java.lang.IllegalArgumentException: %s\n" % msg)
+    sys.stderr.write("\tat com.android.commands.content.Content$QueryCommand.onExecute(Content.java)\n")
+    sys.exit(0)
+
+
+def nullify(value):
+    return "NULL" if value is None else value
+
+
+def load_db():
+    path = os.environ.get("FAKE_SMS_DB", "")
+    if not path or not os.path.isfile(path):
+        provider_error("no database at %s" % path)
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def main():
+    calls = os.environ.get("FAKE_SMS_CALLS")
+    if calls:
+        with open(calls, "a", encoding="utf-8") as fh:
+            fh.write(" ".join(sys.argv[1:]) + "\n")
+
+    args = sys.argv[1:]
+    if not args or args[0] != "query":
+        out(USAGE)
+        out("[ERROR] Unsupported command")
+        return
+
+    opts = {}
+    i = 1
+    while i < len(args):
+        a = args[i]
+        if a.startswith("--"):
+            key = a[2:]
+            if key not in KNOWN_OPTIONS:
+                out(USAGE)
+                out("[ERROR] Unsupported argument: %s" % a)
+                return
+            if i + 1 >= len(args):
+                out(USAGE)
+                out("[ERROR] Missing value for %s" % a)
+                return
+            opts[key] = args[i + 1]
+            i += 2
+        else:
+            out(USAGE)
+            out("[ERROR] Unsupported argument: %s" % a)
+            return
+
+    uri = opts.get("uri", "")
+    projection = [p for p in opts.get("projection", "").split(":") if p]
+    where = opts.get("where", "")
+    sort = opts.get("sort", "")
+    db = load_db()
+    hidden = os.environ.get("FAKE_SMS_HIDE_ITEM", "")
+    rows = []
+
+    if uri.rstrip("/") == "content://sms/inbox":
+        rows = [m for m in db.get("messages", []) if m.get("type", 1) == 1]
+        if "_id > " in where:
+            low = int(where.split("_id > ")[1].split()[0])
+            rows = [m for m in rows if int(m["_id"]) > low]
+        elif "_id < " in where:
+            high = int(where.split("_id < ")[1].split()[0])
+            rows = [m for m in rows if int(m["_id"]) < high]
+        if "DESC" in sort.upper():
+            rows.sort(key=lambda m: int(m["_id"]), reverse=True)
+        else:
+            rows.sort(key=lambda m: int(m["_id"]))
+    elif uri.startswith("content://sms/"):
+        try:
+            wanted = int(uri.rsplit("/", 1)[1])
+        except ValueError:
+            provider_error("bad sms uri %s" % uri)
+        if str(wanted) != hidden:
+            rows = [m for m in db.get("messages", []) if int(m["_id"]) == wanted]
+    elif uri.rstrip("/") == "content://telephony/siminfo":
+        sims = db.get("sims", {})
+        sub = where.split("_id=")[1].split()[0] if "_id=" in where else ""
+        sim = sims.get(sub)
+        if sim is not None:
+            rows = [dict(sim, _id=int(sub))]
+    else:
+        provider_error("unsupported uri %s" % uri)
+
+    if not rows:
+        out("No result found.")
+        return
+
+    for idx, row in enumerate(rows):
+        cols = []
+        for col in projection:
+            if col not in row:
+                provider_error("no such column: %s" % col)
+            cols.append("%s=%s" % (col, nullify(row[col])))
+        out("Row: %d %s" % (idx, ", ".join(cols)))
+
+
+if __name__ == "__main__":
+    main()

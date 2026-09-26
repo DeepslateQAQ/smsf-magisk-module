@@ -1,0 +1,13 @@
+# build artifacts
+build/
+dist/
+.tools/
+*.log
+*.jsonl
+
+# Python cache
+__pycache__/
+*.pyc
+
+# webui vendor build
+tools/webui/node_modules/

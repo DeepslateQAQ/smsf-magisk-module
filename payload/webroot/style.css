@@ -1,0 +1,321 @@
+/* WebUI layout. Every colour comes from tokens.css (--md-sys-color-*, generated
+ * from a seed by tools/webui/gen-tokens.mjs), so the components, the surfaces and
+ * the dark scheme all stay in sync. No literal colours here. */
+
+* { box-sizing: border-box; }
+
+:root {
+  --smsfw-radius: 16px;
+  --smsfw-radius-lg: 24px;
+  --smsfw-gap: 16px;
+  --smsfw-shadow: 0 1px 2px color-mix(in srgb, var(--md-sys-color-shadow) 30%, transparent),
+                  0 1px 3px 1px color-mix(in srgb, var(--md-sys-color-shadow) 15%, transparent);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface);
+  font-family: system-ui, -apple-system, "Noto Sans SC", "Source Han Sans SC", sans-serif;
+  padding-bottom: calc(32px + env(safe-area-inset-bottom));
+}
+
+/* ---------------------------------------------------------------- app bar */
+
+.app-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--smsfw-gap);
+  padding: calc(16px + env(safe-area-inset-top)) 20px 16px;
+  background: var(--md-sys-color-surface-container);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.app-bar__text h1 { margin: 0; }
+.app-bar__text p { margin: 2px 0 0; color: var(--md-sys-color-on-surface-variant); }
+
+main {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: var(--smsfw-gap);
+  display: flex;
+  flex-direction: column;
+  gap: var(--smsfw-gap);
+}
+
+/* ------------------------------------------------------------------ cards */
+
+.card {
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--smsfw-radius-lg);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: card-in 180ms ease-out both;
+}
+
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card { animation: none; }
+}
+
+.card--hero {
+  background: var(--md-sys-color-surface-container-high);
+  box-shadow: var(--smsfw-shadow);
+}
+
+.card h2 { margin: 0; }
+
+.hero__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--smsfw-gap);
+}
+
+.hero__detail {
+  margin: 6px 0 0;
+  color: var(--md-sys-color-on-surface-variant);
+  overflow-wrap: anywhere;
+}
+
+.switch-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* ------------------------------------------------------------------- chips */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  white-space: nowrap;
+}
+
+.chip--off {
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.chip--error {
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+}
+
+/* ------------------------------------------------------------------- stats */
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.stat {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--smsfw-radius);
+  padding: 12px 14px;
+}
+
+.stat__label {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+}
+
+.stat__value {
+  margin-top: 4px;
+  font-size: 1rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------ fields */
+
+.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.fields .span-2 { grid-column: 1 / -1; }
+
+md-outlined-text-field,
+md-outlined-select { width: 100%; }
+
+.code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+/* ------------------------------------------------------- header key/value rows */
+
+.headers { display: flex; flex-direction: column; gap: 8px; }
+
+.headers__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--smsfw-gap);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.headers__rows { display: flex; flex-direction: column; gap: 10px; }
+
+.header-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.header-row md-outlined-text-field { width: 100%; }
+
+/* preserved prose/comments of the headers file (read-only, shown in place) */
+.header-raw {
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 520px) {
+  .header-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .header-row__value { grid-column: 1 / -1; }
+}
+
+.hint { margin: 0; color: var(--md-sys-color-on-surface-variant); }
+
+/* ----------------------------------------------------------------- banners */
+
+.banner {
+  border-radius: var(--smsfw-radius);
+  padding: 14px 16px;
+}
+
+.banner p { margin: 6px 0 0; }
+.banner--warn {
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+}
+.banner--error {
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+}
+
+/* ----------------------------------------------------------------- actions */
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 4px 2px 8px;
+}
+md-filled-button[aria-busy="true"]::before,
+md-filled-tonal-button[aria-busy="true"]::before,
+md-outlined-button[aria-busy="true"]::before,
+md-text-button[aria-busy="true"]::before {
+  content: '';
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-inline-end: 8px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: smsfw-spin 700ms linear infinite;
+  vertical-align: -0.15em;
+}
+
+@keyframes smsfw-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  md-filled-button[aria-busy="true"]::before,
+  md-filled-tonal-button[aria-busy="true"]::before,
+  md-outlined-button[aria-busy="true"]::before,
+  md-text-button[aria-busy="true"]::before {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------ output */
+
+.output__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--smsfw-gap);
+}
+
+.output {
+  margin: 0;
+  padding: 14px;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: var(--smsfw-radius);
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ----------------------------------------------------------------- snackbar */
+
+.snackbar {
+  position: fixed;
+  left: 50%;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 3;
+  max-width: min(90vw, 480px);
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: var(--md-sys-color-inverse-surface);
+  color: var(--md-sys-color-inverse-on-surface);
+  box-shadow: var(--smsfw-shadow);
+  animation: snack-in 160ms ease-out both;
+}
+
+@keyframes snack-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ------------------------------------------------------------ focus / a11y */
+
+md-filled-button:focus-visible,
+md-outlined-button:focus-visible,
+md-filled-tonal-button:focus-visible,
+md-text-button:focus-visible,
+md-switch:focus-visible,
+md-outlined-text-field:focus-within,
+md-outlined-select:focus-within {
+  outline: 3px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+
+@media (max-width: 520px) {
+  .hero__row { flex-direction: column; align-items: flex-start; }
+  .app-bar { align-items: flex-start; }
+}

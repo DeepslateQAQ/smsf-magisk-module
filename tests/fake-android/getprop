@@ -1,0 +1,10 @@
+#!/bin/sh
+# Fake getprop for the daemon integration tests.
+
+case "$1" in
+    ro.product.model)   echo "Pixel-Test" ;;
+    ro.product.brand)   echo "TestBrand" ;;
+    sys.boot_completed) echo "1" ;;
+    ro.crypto.state)    echo "encrypted" ;;
+    *)                  exit 1 ;;
+esac

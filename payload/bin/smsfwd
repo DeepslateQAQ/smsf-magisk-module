@@ -1,0 +1,392 @@
+#!/system/bin/sh
+# smsfwd - SMS webhook daemon.
+#
+#   supervise   run the worker forever, restarting it if it dies (boot entry point)
+#   run         worker main loop (waits for boot/provider, polls, drains queue)
+#   poll-once   single poll + queue drain (testing / manual poke)
+#   flush       ignore retry backoff and try the whole queue now
+#   collect ID  build + enqueue a record for one SMS id (debug)
+#   version
+
+set -u
+
+DIR=$(dirname "$0")
+. "$DIR/common.sh"
+
+# ------------------------------------------------------------------ helpers
+
+state_get() { # FILE DEFAULT
+    if [ -f "$SMSF_STATE/$1" ]; then
+        cat "$SMSF_STATE/$1"
+    else
+        printf '%s' "$2"
+    fi
+}
+
+state_put() { # FILE VALUE
+    printf '%s' "$2" > "$SMSF_STATE/$1"
+}
+
+backoff_delay() { # ATTEMPTS
+    delay=$SMSFW_RETRY_DELAY
+    [ -n "$delay" ] || delay=5
+    [ "$delay" -lt 1 ] && delay=1
+    i=1
+    while [ "$i" -lt "$1" ]; do
+        delay=$((delay * 2))
+        if [ "$delay" -ge 3600 ]; then
+            delay=3600
+            break
+        fi
+        i=$((i + 1))
+    done
+    printf '%s' "$delay"
+}
+
+wait_for_ready() {
+    log_info WAIT_BOOT
+    i=0
+    while [ "$i" -lt 600 ]; do
+        if [ "$($GETPROP_BIN sys.boot_completed 2>/dev/null)" = "1" ]; then
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    if [ "$i" -ge 600 ]; then
+        log_warn BOOT_TIMEOUT
+    fi
+
+    log_info WAIT_PROVIDER
+    i=0
+    while [ "$i" -lt 300 ]; do
+        if probe_content; then
+            log_info PROVIDER_READY "${CONTENT_USER_ARGS:-none}" "$SMSF_HAS_SUB_ID" "$(getprop ro.crypto.state 2>/dev/null)"
+            return 0
+        fi
+        sleep 2
+        i=$((i + 1))
+    done
+    log_error PROVIDER_DOWN
+    return 1
+}
+
+# ------------------------------------------------------------------ polling
+
+baseline_state() {
+    if [ "$SMSFW_FORWARD_EXISTING" = "1" ]; then
+        state_put last_sms_id 0
+        log_info BASELINE_ALL
+        return 0
+    fi
+    last=$(max_inbox_id)
+    case "$last" in
+        ''|*[!0-9]*) last=0 ;;
+    esac
+    state_put last_sms_id "$last"
+    log_info BASELINE "$last"
+}
+
+process_message() { # SMS_ID
+    id=$1
+    sender=$(sms_field "$id" address)
+    body=$(sms_field "$id" body)
+    date_ms=$(sms_field "$id" date)
+    service_center=$(sms_field "$id" service_center)
+    case "$date_ms" in
+        ''|*[!0-9]*) date_ms=$(now_ms) ;;
+    esac
+
+    if [ -z "$sender" ] && [ -z "$body" ]; then
+        log_warn MSG_GONE "$id"
+        return 0
+    fi
+    if ! passes_filters "$sender" "$body"; then
+        log_info SKIP_FILTERED "$id" "$sender"
+        return 1
+    fi
+    if [ -z "$SMSFW_WEBHOOK_URL" ]; then
+        log_warn SKIP_NO_URL "$id" "$sender"
+        return 1
+    fi
+
+    rec=$(new_record_dir "sms$id") || { log_error RECORD_DIR_FAIL; return 1; }
+    snapshot_config_into "$rec"
+    v=$rec/values
+    printf '%s' "$sender" > "$v/FROM"
+    printf '%s' "$body" > "$v/SMS"
+    printf '%s' "$date_ms" > "$v/RECEIVE_TIME_MS"
+    printf '%s' "$id" > "$v/MESSAGE_ID"
+    printf '%s' "$service_center" > "$v/SERVICE_CENTER"
+    printf '%s' "$(device_name)" > "$v/DEVICE_NAME"
+    printf '%s' "$(module_version)" > "$v/APP_VERSION"
+    printf '%s' "$SMSFW_RULE_TITLE" > "$v/RULE_TITLE"
+    printf '0' > "$v/UID"
+    printf '' > "$v/CONTACT_NAME"
+    printf '' > "$v/PHONE_AREA"
+
+    # SIM slot / carrier label
+    sub_id=''
+    if [ "$SMSF_HAS_SUB_ID" = "1" ]; then
+        sub_id=$(sms_field "$id" sub_id)
+    fi
+    printf '%s' "$sub_id" > "$v/CARD_SUBID"
+    printf '%s' "$sub_id" > "$v/SUBSCRIPTION_ID"
+    slot_index=''
+    sim_name=''
+    if [ -n "$sub_id" ]; then
+        sim=$(sim_lookup "$sub_id")
+        if [ -n "$sim" ]; then
+            sim_name=${sim%%|*}
+            slot_index=${sim#*|}
+            [ "$slot_index" = "$sim" ] && slot_index=''
+        fi
+    fi
+    if [ -z "$sim_name" ] && [ -n "$slot_index" ]; then
+        sim_name="SIM $((slot_index + 1))"
+    fi
+    [ -n "$sim_name" ] || sim_name="SIM $sub_id"
+    printf '%s' "$sim_name" > "$v/CARD_SLOT"
+    printf '%s' "$sim_name" > "$v/TITLE"
+    printf '%s' "$slot_index" > "$v/SIM_SLOT_INDEX"
+
+    # Optional extras are only collected when the template references them.
+    if template_uses_tag BATTERY_PCT || template_uses_tag BATTERY_STATUS || template_uses_tag BATTERY_INFO_SIMPLE; then
+        binfo=$(battery_info)
+        printf '%s' "${binfo%%|*}" > "$v/BATTERY_PCT"
+        printf '%s' "${binfo#*|}" > "$v/BATTERY_STATUS"
+        printf '%s%% %s' "${binfo%%|*}" "${binfo#*|}" > "$v/BATTERY_INFO_SIMPLE"
+    fi
+    if template_uses_tag IPV4; then
+        printf '%s' "$(ipv4_address)" > "$v/IPV4"
+    fi
+    printf '' > "$v/NET_TYPE"
+    printf '' > "$v/IPV6"
+    printf '' > "$v/IP_LIST"
+    printf '' > "$v/CALL_TYPE"
+
+    queued=$(enqueue_record "$rec") || { log_error ENQUEUE_FAIL "$id"; return 1; }
+    log_info QUEUED "$id" "$sender" "$sim_name" "$(basename "$queued")"
+    return 0
+}
+
+poll_once() {
+    if [ ! -f "$SMSF_STATE/last_sms_id" ]; then
+        baseline_state
+        return 0
+    fi
+    last=$(state_get last_sms_id 0)
+    case "$last" in
+        ''|*[!0-9]*) last=0 ;;
+    esac
+    ids=$(ids_after "$last")
+    [ -n "$ids" ] || return 0
+    for id in $ids; do
+        process_message "$id"
+        # advance even when filtered, so the message is not reconsidered forever
+        state_put last_sms_id "$id"
+    done
+}
+
+# ------------------------------------------------------------------ queue
+
+enforce_queue_limit() {
+    count=$(queue_count)
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    limit=$SMSFW_QUEUE_LIMIT
+    case "$limit" in ''|*[!0-9]*) limit=200 ;; esac
+    while [ "$count" -gt "$limit" ]; do
+        oldest=$(queue_dirs | head -n 1)
+        oldest=${oldest%/}
+        [ -n "$oldest" ] || break
+        mv "$oldest" "$SMSF_FAILED/$(basename "$oldest")" 2>/dev/null
+        counter_add failed 1
+        log_error QUEUE_DROP "$(basename "$oldest")"
+        count=$((count - 1))
+    done
+}
+
+drain_queue() { # [force]
+    force=${1:-0}
+    now=$(now_s)
+    for d in $(queue_dirs); do
+        [ -d "$d" ] || continue
+        if [ "$force" != "1" ]; then
+            next=$(cat "$d/next_attempt" 2>/dev/null)
+            case "$next" in
+                ''|*[!0-9]*) next=0 ;;
+            esac
+            [ "$now" -lt "$next" ] && continue
+        fi
+        if send_record "$d"; then
+            status=$(head -n 1 "$d/response" 2>/dev/null)
+            rm -rf "$d"
+            counter_add sent 1
+            log_info SENT_LINE "$(basename "$d")" "$status"
+        else
+            rc=$?
+            attempts=$(cat "$d/attempts" 2>/dev/null)
+            case "$attempts" in ''|*[!0-9]*) attempts=0 ;; esac
+            attempts=$((attempts + 1))
+            printf '%s' "$attempts" > "$d/attempts"
+            max=$SMSFW_MAX_ATTEMPTS
+            case "$max" in ''|*[!0-9]*) max=100 ;; esac
+            if [ "$attempts" -ge "$max" ]; then
+                mv "$d" "$SMSF_FAILED/$(basename "$d")" 2>/dev/null
+                counter_add failed 1
+                log_error GIVING_UP "$(basename "$d")" "$attempts" "$rc"
+            else
+                delay=$(backoff_delay "$attempts")
+                printf '%s' "$((now + delay))" > "$d/next_attempt"
+                log_warn SEND_RETRY "$attempts" "$rc" "$delay" "$(basename "$d")"
+            fi
+        fi
+    done
+    enforce_queue_limit
+}
+
+# ------------------------------------------------------------------ entry points
+
+cmd_supervise() {
+    ensure_dirs
+    load_config
+    printf '%s' "$$" > "$SMSF_PID"
+    trap 'rm -f "$SMSF_PID"' EXIT
+    trap 'exit 0' INT TERM
+    log_info SUPERVISOR_START "$$" "$(module_version)" "$(cat "$SMSF_DATA/payload.version" 2>/dev/null || echo '?')"
+    while :; do
+        SMSF_SUPERVISOR_PID=$$ "$SMSF_BIN_DIR/smsfwd" run >>"$SMSF_LOG" 2>&1
+        rc=$?
+        log_warn WORKER_EXIT "$rc" "10"
+        sleep 10
+    done
+}
+
+cleanup_tmp() {
+    now=$(now_s)
+    for d in "$SMSF_TMP"/*; do
+        [ -e "$d" ] || continue
+        mt=$(stat -c '%Y' "$d" 2>/dev/null)
+        case "$mt" in ''|*[!0-9]*) continue ;; esac
+        if [ $((now - mt)) -gt 86400 ]; then
+            rm -rf "$d"
+        fi
+    done
+}
+cmd_run() {
+    ensure_dirs
+    printf '%s' "$$" > "$SMSF_STATE/worker.pid"
+    trap 'rm -f "$SMSF_STATE/worker.pid"' EXIT
+    trap 'exit 0' INT TERM
+    log_info WORKER_START "$$"
+    cleanup_tmp
+    wait_for_ready
+    load_config
+
+    last_wall=$(now_s)
+    last_up=$(cut -d. -f1 /proc/uptime 2>/dev/null | tr -d ' ')
+    fast_until=0
+    ticks=0
+    last_fp=''
+    last_provider_check=0
+
+    db=$(sms_db_path)
+    if [ -n "$db" ]; then
+        log_info WATCH_DB "$db"
+    else
+        log_warn NO_DB "$SMSFW_POLL_INTERVAL"
+    fi
+
+    while :; do
+        load_config
+
+        if [ -n "${SMSF_SUPERVISOR_PID:-}" ] && ! kill -0 "$SMSF_SUPERVISOR_PID" 2>/dev/null; then
+            log_info SUPERVISOR_GONE
+            return 0
+        fi
+
+        if [ "$SMSFW_ENABLED" = "1" ]; then
+            now=$(now_s)
+            fp=$(sms_db_fingerprint) || fp=''
+            do_query=1
+            if [ -n "$fp" ] && [ "$fp" = "$last_fp" ]; then
+                full=$SMSFW_DB_FULL_CHECK_INTERVAL
+                case "$full" in ''|*[!0-9]*) full=60 ;; esac
+                if [ "$full" -gt 0 ] && [ $((now - last_provider_check)) -lt "$full" ]; then
+                    do_query=0
+                    log_raw debug "db unchanged, skipping provider query"
+                fi
+            fi
+            if [ "$do_query" = "1" ]; then
+                poll_once
+                last_provider_check=$now
+            fi
+            last_fp=$fp
+            drain_queue
+        else
+            log_raw debug "disabled, skipping poll"
+        fi
+
+        ticks=$((ticks + 1))
+        [ $((ticks % 60)) -eq 0 ] && rotate_log
+
+        now=$(now_s)
+        up=$(cut -d. -f1 /proc/uptime 2>/dev/null | tr -d ' ')
+        case "$up" in ''|*[!0-9]*) up=0 ;; esac
+        if [ "$up" -gt 0 ] && [ "$last_up" -gt 0 ]; then
+            sleep_gap=$(( (now - last_wall) - (up - last_up) ))
+            if [ "$sleep_gap" -ge 3 ]; then
+                # The device was suspended (SMS reception wakes it up). Poll
+                # quickly for a while to catch writes racing with the resume.
+                fast_until=$((now + 60))
+                log_info SUSPEND_GAP "$sleep_gap"
+            fi
+        fi
+        last_wall=$now
+        last_up=$up
+
+        if [ "$now" -lt "$fast_until" ]; then
+            sleep 1
+        else
+            sleep "$SMSFW_POLL_INTERVAL"
+        fi
+    done
+}
+
+cmd_poll_once() {
+    ensure_dirs
+    load_config
+    if [ "$SMSFW_ENABLED" != "1" ]; then
+        msg POLL_DISABLED; echo
+        exit 0
+    fi
+    probe_content || { msg PROVIDER_FAIL; echo; exit 1; }
+    poll_once
+    drain_queue
+}
+
+cmd_flush() {
+    ensure_dirs
+    load_config
+    drain_queue 1
+}
+
+cmd_collect() {
+    ensure_dirs
+    load_config
+    probe_content || { msg PROVIDER_FAIL; echo; exit 1; }
+    process_message "$1"
+}
+
+case "${1:-}" in
+    supervise)  cmd_supervise ;;
+    run)        cmd_run ;;
+    poll-once)  cmd_poll_once ;;
+    flush)      cmd_flush ;;
+    collect)    cmd_collect "${2:-}" ;;
+    version)    echo "smsfwd $(module_version)" ;;
+    *)
+        echo "usage: smsfwd supervise|run|poll-once|flush|collect <id>|version" >&2
+        exit 2
+        ;;
+esac

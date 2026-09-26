@@ -1,0 +1,15 @@
+#!/bin/sh
+# Fake dumpsys/ifconfig for the daemon integration tests.
+
+if [ "${0##*/}" = "dumpsys" ]; then
+    if [ "$1" = "battery" ]; then
+        echo "Current Battery Service state:"
+        echo "  AC powered: false"
+        echo "  level: 42"
+        echo "  status: 3"
+    fi
+    exit 0
+fi
+
+echo "wlan0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500"
+echo "        inet 192.168.1.23  netmask 255.255.255.0  broadcast 192.168.1.255"

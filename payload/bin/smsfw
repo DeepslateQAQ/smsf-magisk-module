@@ -1,0 +1,557 @@
+#!/system/bin/sh
+# smsfw - control CLI for the SMS webhook module.
+# Run as root:  /data/adb/smsf/bin/smsfw help
+
+set -u
+
+DIR=$(dirname "$0")
+. "$DIR/common.sh"
+# interactive setup wizard (GitHub CLI style TUI)
+if [ -f "$DIR/wizard.sh" ]; then
+    . "$DIR/wizard.sh"
+else
+    wiz_run() { printf 'error: wizard.sh is missing from %s\n' "$DIR" >&2; return 1; }
+fi
+
+# ------------------------------------------------------------------ helpers
+
+say()  { printf '%s\n' "$*"; }
+warn() { gh_warn "$@"; }
+die()  { printf '%s%s%s %s\n' "$C_RED" "$S_ERR" "$C_RESET" "$(msg "$@")" >&2; exit 1; }
+
+resolve_key() { # USER_KEY -> SMSFW_*
+    up=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
+    case "$up" in
+        SMSFW_*)             printf '%s' "$up" ;;
+        URL|WEBHOOK|WEBHOOK_URL)          printf '%s' SMSFW_WEBHOOK_URL ;;
+        METHOD)                           printf '%s' SMSFW_METHOD ;;
+        TEMPLATE)                         printf '%s' SMSFW_TEMPLATE_FILE ;;
+        HEADERS)                          printf '%s' SMSFW_HEADERS_FILE ;;
+        SECRET)                           printf '%s' SMSFW_SECRET_FILE ;;
+        DEVICE|DEVICE_NAME)               printf '%s' SMSFW_DEVICE_NAME ;;
+        POLL|POLL_INTERVAL)               printf '%s' SMSFW_POLL_INTERVAL ;;
+        DB_CHECK|DB_FULL_CHECK_INTERVAL)  printf '%s' SMSFW_DB_FULL_CHECK_INTERVAL ;;
+        TIMEOUT)                          printf '%s' SMSFW_TIMEOUT ;;
+        RETRIES)                          printf '%s' SMSFW_RETRIES ;;
+        RETRY_DELAY)                      printf '%s' SMSFW_RETRY_DELAY ;;
+        MAX_ATTEMPTS)                     printf '%s' SMSFW_MAX_ATTEMPTS ;;
+        QUEUE_LIMIT)                      printf '%s' SMSFW_QUEUE_LIMIT ;;
+        FORWARD_EXISTING)                 printf '%s' SMSFW_FORWARD_EXISTING ;;
+        TLS_INSECURE)                     printf '%s' SMSFW_TLS_INSECURE ;;
+        RESPONSE_MATCH)                   printf '%s' SMSFW_RESPONSE_MATCH ;;
+        SENDER_ALLOW|FILTER_SENDER_ALLOW) printf '%s' SMSFW_FILTER_SENDER_ALLOW ;;
+        SENDER_BLOCK|FILTER_SENDER_BLOCK) printf '%s' SMSFW_FILTER_SENDER_BLOCK ;;
+        BODY_ALLOW|FILTER_BODY_ALLOW)     printf '%s' SMSFW_FILTER_BODY_ALLOW ;;
+        BODY_BLOCK|FILTER_BODY_BLOCK)     printf '%s' SMSFW_FILTER_BODY_BLOCK ;;
+        RULE_TITLE)                       printf '%s' SMSFW_RULE_TITLE ;;
+        LOG_LEVEL)                        printf '%s' SMSFW_LOG_LEVEL ;;
+        *)                                printf 'SMSFW_%s' "$up" ;;
+    esac
+}
+
+build_sample_record() { # DIR FROM BODY
+    d=$1
+    [ -n "$d" ] || return 1
+    from=$2
+    body=$3
+    snapshot_config_into "$d"
+    v=$d/values
+    mkdir -p "$v"
+    printf '%s' "$from" > "$v/FROM"
+    printf '%s' "$body" > "$v/SMS"
+    printf '%s' "$(now_ms)" > "$v/RECEIVE_TIME_MS"
+    printf '0' > "$v/MESSAGE_ID"
+    printf '' > "$v/SERVICE_CENTER"
+    printf '%s' "$(device_name)" > "$v/DEVICE_NAME"
+    printf '%s' "$(module_version)" > "$v/APP_VERSION"
+    printf '%s' "$SMSFW_RULE_TITLE" > "$v/RULE_TITLE"
+    printf '0' > "$v/UID"
+    printf 'TEST' > "$v/CARD_SLOT"
+    printf 'TEST' > "$v/TITLE"
+    printf '0' > "$v/CARD_SUBID"
+    printf '0' > "$v/SUBSCRIPTION_ID"
+    printf '0' > "$v/SIM_SLOT_INDEX"
+    printf '' > "$v/CONTACT_NAME"
+    printf '' > "$v/PHONE_AREA"
+    printf '' > "$v/NET_TYPE"
+    printf '' > "$v/IPV6"
+    printf '' > "$v/IP_LIST"
+    printf '' > "$v/CALL_TYPE"
+    if template_uses_tag BATTERY_PCT || template_uses_tag BATTERY_STATUS; then
+        binfo=$(battery_info)
+        printf '%s' "${binfo%%|*}" > "$v/BATTERY_PCT"
+        printf '%s' "${binfo#*|}" > "$v/BATTERY_STATUS"
+        printf '%s%% %s' "${binfo%%|*}" "${binfo#*|}" > "$v/BATTERY_INFO_SIMPLE"
+    fi
+    printf '%s' "$(ipv4_address)" > "$v/IPV4"
+}
+
+# ------------------------------------------------------------------ commands
+
+cmd_status() {
+    load_config
+    gh_ok MODULE "$(module_version)"
+    pid=$(daemon_pid)
+    enabled_text=$([ "$SMSFW_ENABLED" = "1" ] && msg YES || msg NO)
+    if [ -n "$pid" ]; then
+        gh_kv "$(msg ENABLED)" "$enabled_text  $(msg DAEMON): $(msg RUNNING) (pid $pid)"
+    else
+        gh_kv "$(msg ENABLED)" "$enabled_text  $(msg DAEMON): $(msg STOPPED)"
+    fi
+    worker=$(cat "$SMSF_STATE/worker.pid" 2>/dev/null)
+    [ -n "$worker" ] && gh_kv "$(msg WORKER)" "pid $worker"
+    gh_kv "$(msg WEBHOOK)" "$([ -n "$SMSFW_WEBHOOK_URL" ] && printf '%s' "$SMSFW_WEBHOOK_URL" || msg NOT_SET)"
+    gh_kv "$(msg METHOD)" "$SMSFW_METHOD"
+    tmpl_note=$([ -f "$SMSFW_TEMPLATE_FILE" ] && msg FOUND || msg MISSING)
+    gh_kv "$(msg TEMPLATE)" "$SMSFW_TEMPLATE_FILE ($tmpl_note)"
+    hdrs_note=$([ -f "$SMSFW_HEADERS_FILE" ] && msg FOUND || msg MISSING)
+    gh_kv "$(msg HEADERS)" "$SMSFW_HEADERS_FILE ($hdrs_note)"
+    gh_kv "$(msg SECRET)" "$([ -f "$SMSFW_SECRET_FILE" ] && msg SECRET_SET || msg SECRET_NONE)"
+    gh_kv "$(msg DEVICE)" "$(device_name)"
+    last=$(cat "$SMSF_STATE/last_sms_id" 2>/dev/null)
+    gh_kv "$(msg LAST_SMS_ID)" "${last:-$(msg UNSET)}"
+    gh_kv "$(msg QUEUE)" "$(queue_count) $(msg PENDING), $(failed_count) $(msg FAILED)"
+    gh_kv "$(msg COUNTERS)" "$(msg SENT) $(counter_get sent) / $(msg FAILED) $(counter_get failed)"
+    gh_kv "$(msg PAYLOAD)" "$(cat "$SMSF_DATA/payload.version" 2>/dev/null || echo '?') runner=$(cat "$SMSF_RUNNER_CACHE" 2>/dev/null || msg TRANSPORT_UNSET)"
+    gh_kv "$(msg LOG)" "$SMSF_LOG"
+}
+
+# Machine-readable state for the KernelSU/APatch WebUI (and scripts).
+cmd_status_json() {
+    {
+    load_config
+    if daemon_pid >/dev/null; then
+        daemon_running=true
+        daemon_pid_value=$(daemon_pid)
+    else
+        daemon_running=false
+        daemon_pid_value=''
+    fi
+    if config_was_tested; then tested=true; else tested=false; fi
+    last=$(cat "$SMSF_STATE/last_sms_id" 2>/dev/null)
+    printf '{\n'
+    printf '  "module_version": "%s",\n' "$(json_escape "$(module_version)")"
+    printf '  "payload_version": "%s",\n' "$(json_escape "$(cat "$SMSF_DATA/payload.version" 2>/dev/null || echo '?')")"
+    printf '  "runner": "%s",\n' "$(json_escape "$(cat "$SMSF_RUNNER_CACHE" 2>/dev/null || echo '')")"
+    printf '  "enabled": %s,\n' "$([ "$SMSFW_ENABLED" = "1" ] && echo true || echo false)"
+    printf '  "tested": %s,\n' "$tested"
+    printf '  "daemon_running": %s,\n' "$daemon_running"
+    printf '  "daemon_pid": "%s",\n' "$daemon_pid_value"
+    printf '  "webhook": "%s",\n' "$(json_escape "$SMSFW_WEBHOOK_URL")"
+    printf '  "method": "%s",\n' "$(json_escape "$SMSFW_METHOD")"
+    printf '  "template": "%s",\n' "$(json_escape "$SMSFW_TEMPLATE_FILE")"
+    printf '  "template_exists": %s,\n' "$([ -f "$SMSFW_TEMPLATE_FILE" ] && echo true || echo false)"
+    printf '  "headers": "%s",\n' "$(json_escape "$SMSFW_HEADERS_FILE")"
+    printf '  "headers_exist": %s,\n' "$([ -f "$SMSFW_HEADERS_FILE" ] && echo true || echo false)"
+    printf '  "secret_set": %s,\n' "$([ -f "$SMSFW_SECRET_FILE" ] && echo true || echo false)"
+    printf '  "response_match": "%s",\n' "$(json_escape "$SMSFW_RESPONSE_MATCH")"
+    printf '  "tls_insecure": %s,\n' "$([ "$SMSFW_TLS_INSECURE" = "1" ] && echo true || echo false)"
+    printf '  "device": "%s",\n' "$(json_escape "$(device_name)")"
+    printf '  "rule_title": "%s",\n' "$(json_escape "$SMSFW_RULE_TITLE")"
+    printf '  "last_sms_id": "%s",\n' "$(json_escape "$last")"
+    printf '  "queue_pending": %s,\n' "$(json_num "$(queue_count)")"
+    printf '  "queue_failed": %s,\n' "$(json_num "$(failed_count)")"
+    printf '  "counter_sent": %s,\n' "$(json_num "$(counter_get sent)")"
+    printf '  "counter_failed": %s,\n' "$(json_num "$(counter_get failed)")"
+    printf '  "timeout": %s,\n' "$(json_num "$SMSFW_TIMEOUT" 15)"
+    printf '  "retries": %s,\n' "$(json_num "$SMSFW_RETRIES" 2)"
+    printf '  "retry_delay": %s,\n' "$(json_num "$SMSFW_RETRY_DELAY" 5)"
+    printf '  "poll_interval": %s,\n' "$(json_num "$SMSFW_POLL_INTERVAL" 5)"
+    printf '  "db_check": %s,\n' "$(json_num "$SMSFW_DB_FULL_CHECK_INTERVAL" 60)"
+    printf '  "queue_limit": %s,\n' "$(json_num "$SMSFW_QUEUE_LIMIT" 200)"
+    printf '  "filter_sender_allow": "%s",\n' "$(json_escape "$SMSFW_FILTER_SENDER_ALLOW")"
+    printf '  "filter_sender_block": "%s",\n' "$(json_escape "$SMSFW_FILTER_SENDER_BLOCK")"
+    printf '  "filter_body_allow": "%s",\n' "$(json_escape "$SMSFW_FILTER_BODY_ALLOW")"
+    printf '  "filter_body_block": "%s",\n' "$(json_escape "$SMSFW_FILTER_BODY_BLOCK")"
+    printf '  "config_path": "%s",\n' "$(json_escape "$SMSF_CONF")"
+    printf '  "log_path": "%s",\n' "$(json_escape "$SMSF_LOG")"
+    printf '  "lang": "%s"\n' "$(json_escape "$SMSF_LANG")"
+        printf '}\n'
+    } | tr -d '\n'
+    printf '\n'
+}
+
+cmd_set() {
+    [ $# -ge 1 ] || die SET_USAGE
+    input_key=$1
+    key=$(resolve_key "$input_key")
+    config_key_valid "$key" || die UNKNOWN_KEY "$input_key"
+    shift
+    value="$*"
+    cfg_set "$key" "$value" || die UNKNOWN_KEY "$input_key"
+    gh_ok SAVED "$key" "$value"
+}
+
+cmd_get() {
+    [ $# -ge 1 ] || die GET_USAGE
+    input_key=$1
+    key=$(resolve_key "$input_key")
+    config_key_valid "$key" || die UNKNOWN_KEY "$input_key"
+    cfg_get "$key" || die UNKNOWN_KEY "$input_key"
+    echo
+}
+
+# Inline setters: the WebUI bridge has no stdin channel, so content must be
+# passed as an argument. Single-quoted shell strings keep newlines literal.
+cmd_put() { # KEYFILE CONTENT KIND
+    kind=$1
+    content=$2
+    ensure_dirs || die DATA_DIR_FAIL "$SMSF_DATA"
+    case "$kind" in
+        template) target=$SMSF_DATA/template.json ;;
+        headers)  target=$SMSF_DATA/headers.txt ;;
+        secret)   target=$SMSF_DATA/secret ;;
+        *)        die TEMPLATE_USAGE ;;
+    esac
+    printf '%s' "$content" > "$target" || die W_WRITE_FAIL "$target"
+    case "$kind" in
+        template) chmod 644 "$target"; cfg_set SMSFW_TEMPLATE_FILE "$target"; gh_ok TEMPLATE_SET "$target" ;;
+        headers)  chmod 644 "$target"; cfg_set SMSFW_HEADERS_FILE "$target"; gh_ok HEADERS_SET "$target" ;;
+        secret)   chmod 600 "$target"; cfg_set SMSFW_SECRET_FILE "$target"; gh_ok SECRET_SET_MSG ;;
+    esac
+}
+
+cmd_show() {
+    say "# $SMSF_CONF"
+    if [ -f "$SMSF_CONF" ]; then
+        cat "$SMSF_CONF"
+    else
+        gh_kv "$(msg CONFIG_FILE)" "$SMSF_CONF"
+    fi
+}
+
+cmd_test() {
+    ensure_dirs || die DATA_DIR_FAIL "$SMSF_DATA"
+    load_config
+    require_data_dir || die DATA_DIR_FAIL "$SMSF_DATA"
+    if [ -z "$SMSFW_WEBHOOK_URL" ]; then
+        die TEST_URL_REQUIRED
+    fi
+    from=${1:-10086}
+    body=${2:-"smsfw test message $(date '+%Y-%m-%d %H:%M:%S')"}
+    rec=$(new_record_dir test) || die DATA_DIR_FAIL "$SMSF_DATA"
+    build_sample_record "$rec" "$from" "$body"
+    gh_kv "$(msg METHOD)" "$SMSFW_METHOD"
+    gh_kv "$(msg WEBHOOK)" "$SMSFW_WEBHOOK_URL"
+    if send_record "$rec"; then
+        gh_ok TEST_OK "$(head -n 1 "$rec/response" 2>/dev/null)"
+        mark_config_tested
+        rm -rf "$rec"
+        return 0
+    fi
+    rc=$?
+    gh_err TEST_FAIL "$rc"
+    [ -f "$rec/response" ] && gh_kv "$(msg TEST_RESPONSE)" "$(cat "$rec/response")"
+    warn TEST_KEPT "$rec"
+    return 1
+}
+
+cmd_preview() {
+    ensure_dirs || die DATA_DIR_FAIL "$SMSF_DATA"
+    load_config
+    require_data_dir || die DATA_DIR_FAIL "$SMSF_DATA"
+    from=${1:-10086}
+    body=${2:-"smsfw preview message"}
+    rec=$(new_record_dir preview) || die DATA_DIR_FAIL "$SMSF_DATA"
+    build_sample_record "$rec" "$from" "$body"
+    set -- render --url-file "$rec/url" --method "$(cat "$rec/method")" --values-dir "$rec/values"
+    [ -f "$rec/template" ] && set -- "$@" --template-file "$rec/template"
+    [ -f "$rec/headers" ] && set -- "$@" --headers-file "$rec/headers"
+    [ -f "$rec/secret" ] && set -- "$@" --secret-file "$rec/secret"
+    gh_head "$(msg PREVIEW_URL)"
+    run_payload "$@" --target url
+    gh_head "$(msg PREVIEW_BODY)"
+    run_payload "$@" --target body
+    rm -rf "$rec"
+}
+
+cmd_log() {
+    n=50
+    follow=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -f|--follow) follow=1 ;;
+            -n) n=$2; shift ;;
+            *) n=$1 ;;
+        esac
+        shift
+    done
+    [ -f "$SMSF_LOG" ] || { warn NO_LOG "$SMSF_LOG"; return 0; }
+    if [ "$follow" = "1" ]; then
+        tail -n "$n" -f "$SMSF_LOG"
+    else
+        tail -n "$n" "$SMSF_LOG"
+    fi
+}
+
+cmd_queue() {
+    case "${1:-list}" in
+        list)
+            count=$(queue_count)
+            gh_ok QUEUE_LIST "$count" "$SMSFW_QUEUE_LIMIT" "$SMSFW_MAX_ATTEMPTS"
+            for d in $(queue_dirs); do
+                d=${d%/}
+                gh_kv "  $(basename "$d")" "$(msg ATTEMPTS)=$(cat "$d/attempts" 2>/dev/null || echo 0) $(msg NEXT)=$(cat "$d/next_attempt" 2>/dev/null || echo 0)"
+            done
+            fc=$(failed_count)
+            [ "$fc" -gt 0 ] && gh_kv "$(msg FAILED)" "$fc $(msg QUEUE_FAILED_COUNT "$fc" "$SMSF_FAILED")"
+            ;;
+        retry)
+            for d in $(queue_dirs); do
+                d=${d%/}
+                rm -f "$d/attempts" "$d/next_attempt"
+            done
+            gh_ok QUEUE_RETRY "$(queue_count)"
+            ;;
+        clear)
+            for d in $(queue_dirs); do
+                d=${d%/}
+                mv "$d" "$SMSF_FAILED/$(basename "$d")" 2>/dev/null
+            done
+            gh_ok QUEUE_CLEAR "$SMSF_FAILED"
+            ;;
+        *) die QUEUE_USAGE ;;
+    esac
+}
+
+cmd_reset_state() {
+    rm -f "$SMSF_STATE/last_sms_id"
+    gh_ok RESET_STATE
+    warn RESET_HINT
+}
+
+cmd_poll() {
+    load_config
+    ensure_dirs
+    # poll_once/drain_queue live in smsfwd, so delegate like `flush` does
+    # instead of calling them from this shell (they are not defined here).
+    "$SMSF_BIN_DIR/smsfwd" poll-once || return $?
+    gh_ok POLL_DONE "$(cat "$SMSF_STATE/last_sms_id" 2>/dev/null)" "$(queue_count)"
+}
+
+cmd_doctor() {
+    load_config
+    ensure_dirs
+    fails=0
+    warns=0
+    ok()  { gh_ok "$@"; }
+    bad() { gh_err "$@"; fails=$((fails + 1)); }
+    wk()  { gh_warn "$@"; warns=$((warns + 1)); }
+
+    gh_head "$(msg DOCTOR_TITLE)"
+    gh_kv "$(msg MODULE)" "$(module_version) @ $SMSF_MODULE_DIR"
+    gh_kv "$(msg DEVICE)" "$SMSF_DATA"
+    gh_kv "$(msg D_BOOT)" "boot_completed=$($GETPROP_BIN sys.boot_completed 2>/dev/null) crypto=$($GETPROP_BIN ro.crypto.state 2>/dev/null) user_unlocked=$($GETPROP_BIN sys.user.0.ce_available 2>/dev/null)"
+
+    if [ "$(id -u 2>/dev/null)" = "0" ]; then ok D_ROOT; else bad D_ROOT; fi
+    if [ -d "$SMSF_DATA" ] && [ -w "$SMSF_DATA" ]; then ok D_DATA; else bad D_DATA; fi
+    if [ -f "$SMSF_JAR" ]; then ok D_PAYLOAD; else bad D_PAYLOAD; fi
+    if [ -n "$(cat "$SMSF_RUNNER_CACHE" 2>/dev/null)" ]; then
+        runner=$(cat "$SMSF_RUNNER_CACHE")
+    else
+        runner=$(probe_runner)
+        printf '%s\n' "$runner" > "$SMSF_RUNNER_CACHE" 2>/dev/null
+    fi
+    if [ "$runner" = "none" ] || [ -z "$runner" ]; then
+        bad D_RUNNER_FAIL
+    else
+        ok D_RUNNER "$runner $(payload_version "$runner")"
+    fi
+    if [ -x "$CONTENT_BIN" ]; then ok D_CONTENT; else bad D_CONTENT; fi
+    if probe_content; then
+        ok D_PROVIDER "default" "$SMSF_HAS_SUB_ID"
+    else
+        bad D_PROVIDER_FAIL
+    fi
+    ids=$(content_fetch content://sms/inbox _id '' '_id DESC' | head -n 3)
+    if [ -n "$ids" ]; then
+        gh_kv "$(msg D_SAMPLE)" "$(printf '%s' "$ids" | tr '\n' ' ')"
+        ok D_ROWS
+    else
+        wk D_NO_ROWS
+    fi
+    sim=$(sim_lookup 1)
+    if [ -n "$sim" ]; then
+        gh_kv "$(msg D_SIMINFO)" "$sim"
+    else
+        wk D_NO_SIMINFO
+    fi
+    if [ -n "$SMSFW_WEBHOOK_URL" ]; then ok D_URL; else bad D_URL_FAIL; fi
+    if [ -f "$SMSFW_TEMPLATE_FILE" ]; then
+        ok D_TEMPLATE
+    else
+        wk D_NO_TEMPLATE
+    fi
+    if [ -f "$SMSFW_HEADERS_FILE" ]; then ok D_HEADERS; fi
+    if [ -n "$SMSFW_DEVICE_NAME" ]; then gh_info DEVICE_OVERRIDE "$SMSFW_DEVICE_NAME"; fi
+    if [ -x /system/bin/smsfw ] || command -v smsfw >/dev/null 2>&1; then
+        ok D_CLI
+    else
+        wk D_CLI_FAIL
+    fi
+    gh_kv "$(msg QUEUE)" "$(queue_count) $(msg PENDING), $(failed_count) $(msg FAILED)"
+    gh_kv "$(msg D_BOOT)" "$(msg D_RESULT "$fails" "$warns")"
+    [ "$fails" -eq 0 ]
+}
+
+# Bare `smsfw`: guess what the user most likely wants (wizard / test / status)
+# and fall back to help when the answer is "no" or Esc. Piped/non-tty runs go
+# straight to help so scripts never block on a prompt.
+cmd_auto() {
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        cmd_help
+        return 0
+    fi
+    wiz_auto || cmd_help
+}
+
+cmd_start()   { load_config; start_daemon && gh_ok START; }
+cmd_stop()    { load_config; stop_daemon; gh_ok STOP; }
+cmd_restart() { load_config; stop_daemon; start_daemon && gh_ok RESTART; }
+
+cmd_on()  { load_config; cfg_set SMSFW_ENABLED 1; gh_ok ENABLED_MSG; }
+cmd_off() { load_config; cfg_set SMSFW_ENABLED 0; gh_ok DISABLED_MSG; }
+
+cmd_help() {
+    msg HELP
+    say
+}
+
+cmd_help_unused() {
+    cat <<'EOF'
+smsfw - SMS webhook forwarder (Magisk module)
+
+  wizard                  interactive setup wizard (recommended first step)
+  status                  show configuration + daemon state
+  start | stop | restart  control the daemon (auto-starts on boot)
+  on | off                enable/disable forwarding (live, no restart)
+  doctor                  diagnose provider/payload/transport problems
+
+  set <key> <value>       change a setting (see keys below)
+  get <key>               print a setting
+  show                    print config.conf
+
+  url <https://...>       shortcut for: set url
+  template [cat|set F]    show or replace the payload template
+  headers [cat|set F]     show or replace extra HTTP headers
+  secret [clear|set F]    show, clear or replace the HMAC secret
+
+  test [from] [body]      send a real test webhook now
+  preview [from] [body]   render the request without sending
+  poll                    run one poll cycle immediately
+  flush                   retry the whole queue now (ignores backoff)
+  queue [list|retry|clear] inspect/retry/drop pending messages
+  reset-state             re-baseline the inbox scan
+  log [-n N] [-f]         show/follow the daemon log
+  status --json           machine-readable state (used by the WebUI)
+  version | help
+
+Config keys (also usable with the SMSFW_ prefix):
+  url method template headers secret device poll db_check timeout retries
+  retry_delay max_attempts queue_limit forward_existing tls_insecure
+  response_match sender_allow sender_block body_allow body_block
+  rule_title log_level
+
+Examples:
+  smsfw wizard                          # 交互式配置（推荐）
+  smsfw set url https://example.com/sms
+  smsfw set sender_block '^(10086|95533)$'      # ERE regex
+  smsfw template set /sdcard/my-template.json
+  smsfw test 10086 "hello from smsfw"
+EOF
+}
+
+case "${1:-}" in
+    '')            cmd_auto ;;
+    wizard|setup|config) wiz_run ;;
+    status)
+        if [ "${2:-}" = "--json" ]; then
+            cmd_status_json
+        else
+            cmd_status
+        fi ;;
+    start)         cmd_start ;;
+    stop)          cmd_stop ;;
+    restart)       cmd_restart ;;
+    on)            cmd_on ;;
+    off)           cmd_off ;;
+    set)           shift; cmd_set "$@" ;;
+    get)           shift; cmd_get "$@" ;;
+    show)          cmd_show ;;
+    url)           shift; cmd_set url "$@" ;;
+    template)
+        shift
+        case "${1:-cat}" in
+            cat|show)
+                file=$(cfg_get SMSFW_TEMPLATE_FILE 2>/dev/null || echo "$SMSF_DATA/template.json")
+                if [ "${2:-}" = "--base64" ]; then
+                    base64 -w 0 "$file" || exit 1
+                    printf '\n'
+                else
+                    cat "$file"
+                fi
+                ;;
+            put)      [ $# -ge 2 ] || die TEMPLATE_USAGE; cmd_put template "$2" ;;
+            set)
+                [ -n "${2:-}" ] || die TEMPLATE_USAGE
+                [ -f "$2" ] || die TEMPLATE_NO_FILE "$2"
+                cp -f "$2" "$SMSF_DATA/template.json" || die TEMPLATE_NO_FILE "$2"
+                chmod 644 "$SMSF_DATA/template.json"
+                cfg_set SMSFW_TEMPLATE_FILE "$SMSF_DATA/template.json"
+                gh_ok TEMPLATE_SET "$SMSF_DATA/template.json"
+                ;;
+            *)        die TEMPLATE_USAGE ;;
+        esac ;;
+    headers)
+        shift
+        case "${1:-cat}" in
+            cat|show)
+                file=$(cfg_get SMSFW_HEADERS_FILE 2>/dev/null || echo "$SMSF_DATA/headers.txt")
+                if [ "${2:-}" = "--base64" ]; then
+                    base64 -w 0 "$file" || exit 1
+                    printf '\n'
+                else
+                    cat "$file"
+                fi
+                ;;
+            put)      [ $# -ge 2 ] || die HEADERS_USAGE; cmd_put headers "$2" ;;
+            set)
+                [ -n "${2:-}" ] || die HEADERS_USAGE
+                [ -f "$2" ] || die TEMPLATE_NO_FILE "$2"
+                cp -f "$2" "$SMSF_DATA/headers.txt" || die TEMPLATE_NO_FILE "$2"
+                chmod 644 "$SMSF_DATA/headers.txt"
+                cfg_set SMSFW_HEADERS_FILE "$SMSF_DATA/headers.txt"
+                gh_ok HEADERS_SET "$SMSF_DATA/headers.txt"
+                ;;
+            *)        die HEADERS_USAGE ;;
+        esac ;;
+    secret)
+        shift
+        case "${1:-show}" in
+            show)
+                if [ -f "$SMSF_DATA/secret" ]; then
+                    gh_ok SECRET_SHOW "$SMSF_DATA/secret"
+                else
+                    gh_kv "$(msg SECRET)" "$(msg SECRET_NONE)"
+                fi ;;
+            clear) rm -f "$SMSF_DATA/secret"; gh_ok SECRET_CLEAR ;;
+            set)   [ -n "${2:-}" ] || die SECRET_USAGE; [ -f "$2" ] || die TEMPLATE_NO_FILE "$2"; cp "$2" "$SMSF_DATA/secret" || die TEMPLATE_NO_FILE "$2"; chmod 600 "$SMSF_DATA/secret"; gh_ok SECRET_SET_MSG ;;
+            put)   [ $# -ge 2 ] || die SECRET_USAGE; cmd_put secret "$2" ;;
+            *)     die SECRET_USAGE ;;
+        esac ;;
+    test)          shift; cmd_test "$@" ;;
+    preview)       shift; cmd_preview "$@" ;;
+    flush)
+        load_config
+        ensure_dirs
+        "$SMSF_BIN_DIR/smsfwd" flush
+        gh_ok FLUSH_DONE "$(queue_count)" "$(failed_count)" ;;
+    log|logs)      shift; cmd_log "$@" ;;
+    queue)         shift; cmd_queue "$@" ;;
+    reset-state)   cmd_reset_state ;;
+    poll)          cmd_poll ;;
+    doctor)        cmd_doctor ;;
+    version)       say "smsfw $(module_version)" ;;
+    help|-h|--help) cmd_help ;;
+    *)             cmd_help; exit 2 ;;
+esac

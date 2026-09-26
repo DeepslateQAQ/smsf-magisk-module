@@ -1,0 +1,70 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install build/test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip unzip python3 shellcheck
+
+      - name: Build payload and module zip
+        run: ./build.sh all
+
+      - name: Run tests
+        run: ./build.sh test
+
+      - name: Lint shell scripts
+        run: |
+          shellcheck -S warning -s sh payload/bin/common.sh payload/bin/smsfwd payload/bin/smsfw \
+            payload/bin/wizard.sh payload/bin/i18n.sh payload/system/bin/smsfw \
+            payload/service.sh payload/action.sh payload/uninstall.sh payload/customize.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smsf-webhook-module
+          path: payload/**
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smsf-webhook-dist
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Build module zip
+        run: |
+          sudo apt-get update && sudo apt-get install -y zip unzip
+          ./build.sh all
+      - name: Prepare stable module asset
+        run: cp dist/*.zip dist/module.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/module.zip
+          generate_release_notes: true

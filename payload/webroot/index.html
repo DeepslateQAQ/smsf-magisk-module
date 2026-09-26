@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>smsfw · 短信转发</title>
+  <!-- Material 3 palette (generated from a seed) and the vendored Material Web
+       components. Nothing is fetched at runtime: the device may be offline. -->
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="app-bar">
+    <div class="app-bar__text">
+      <h1 class="md-typescale-title-large">短信转发</h1>
+      <p id="subtitle" class="md-typescale-body-small">smsfw</p>
+    </div>
+    <span id="state-chip" class="chip" role="status" aria-live="polite">—</span>
+  </header>
+
+  <main>
+    <section id="bridge-warning" class="banner banner--warn" role="status" aria-live="polite" hidden>
+      <strong>未检测到 WebUI 桥接</strong>
+      <p class="md-typescale-body-small">
+        请从 KernelSU / APatch 管理器的模块页面打开本页；普通浏览器里只能查看界面，无法读写配置。
+      </p>
+    </section>
+
+    <div id="global-error" class="banner banner--error md-typescale-body-medium" role="alert" aria-live="assertive" hidden></div>
+
+    <section class="card card--hero">
+      <div class="hero__row">
+        <div>
+          <h2 id="state-title" class="md-typescale-headline-small">—</h2>
+          <p id="state-detail" class="md-typescale-body-medium hero__detail">—</p>
+        </div>
+        <label class="switch-field">
+          <span class="md-typescale-label-large">转发</span>
+          <md-switch id="enabled-toggle" aria-label="转发开关"></md-switch>
+        </label>
+      </div>
+      <md-divider></md-divider>
+      <div id="stat-grid" class="stat-grid"></div>
+    </section>
+
+    <section class="card">
+      <h2 class="md-typescale-title-medium">推送目标</h2>
+      <div class="fields">
+        <md-outlined-text-field id="f-url" class="span-2" label="Webhook 地址"
+          placeholder="https://example.com/sms" spellcheck="false"></md-outlined-text-field>
+        <md-outlined-select id="f-method" label="请求方式">
+          <md-select-option value="POST" selected><div slot="headline">POST</div></md-select-option>
+          <md-select-option value="PUT"><div slot="headline">PUT</div></md-select-option>
+          <md-select-option value="PATCH"><div slot="headline">PATCH</div></md-select-option>
+          <md-select-option value="GET"><div slot="headline">GET</div></md-select-option>
+        </md-outlined-select>
+        <md-outlined-text-field id="f-response" label="响应校验关键词"
+          placeholder="留空表示不校验" spellcheck="false"></md-outlined-text-field>
+        <md-outlined-text-field id="f-device" label="设备名" spellcheck="false"></md-outlined-text-field>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="md-typescale-title-medium">过滤规则</h2>
+      <p class="md-typescale-body-small hint">正则表达式（ERE）。白名单非空时只转发匹配的短信；黑名单优先。</p>
+      <div class="fields">
+        <md-outlined-text-field id="f-sender-allow" label="发件人白名单" spellcheck="false"></md-outlined-text-field>
+        <md-outlined-text-field id="f-sender-block" label="发件人黑名单" spellcheck="false"></md-outlined-text-field>
+        <md-outlined-text-field id="f-body-allow" label="正文白名单" spellcheck="false"></md-outlined-text-field>
+        <md-outlined-text-field id="f-body-block" label="正文黑名单" spellcheck="false"></md-outlined-text-field>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="md-typescale-title-medium">网络</h2>
+      <p class="md-typescale-body-small hint">
+        模块不带代理设置：系统级 TUN 代理（如 Magisk 版 mihomo）会自动作用于本模块的请求。
+      </p>
+      <div class="fields">
+        <md-outlined-text-field id="f-timeout" label="超时（秒）" type="number" min="1" inputmode="numeric"></md-outlined-text-field>
+        <md-outlined-text-field id="f-retries" label="重试次数" type="number" min="0" inputmode="numeric"></md-outlined-text-field>
+        <md-outlined-text-field id="f-retry-delay" label="重试延迟（秒）" type="number" min="1" inputmode="numeric"></md-outlined-text-field>
+        <md-outlined-text-field id="f-db-check" label="Provider 兜底检查（秒）" type="number" min="0" inputmode="numeric"></md-outlined-text-field>
+        <md-outlined-text-field id="f-poll" label="轮询间隔（秒）" type="number" min="1" inputmode="numeric"></md-outlined-text-field>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="md-typescale-title-medium">请求内容</h2>
+      <div class="fields">
+        <md-outlined-text-field id="f-template" class="span-2 code" type="textarea" rows="8"
+          label="模板（[from] [content] [receive_time] 等标签）" spellcheck="false"></md-outlined-text-field>
+        <div class="span-2 headers">
+          <div class="headers__head">
+            <span class="md-typescale-label-large">额外请求头</span>
+            <md-text-button id="btn-add-header">添加请求头</md-text-button>
+          </div>
+          <div id="headers-rows" class="headers__rows"></div>
+        </div>
+        <md-outlined-text-field id="f-secret" class="span-2" label="HMAC 密钥（留空不修改）"
+          type="password" spellcheck="false"></md-outlined-text-field>
+        <md-text-button id="btn-clear-secret" class="span-2">清除密钥</md-text-button>
+      </div>
+      <p id="secret-hint" class="md-typescale-body-small hint"></p>
+    </section>
+
+    <section class="actions">
+      <md-filled-button id="btn-save">保存配置</md-filled-button>
+      <md-filled-tonal-button id="btn-test">发送测试推送</md-filled-tonal-button>
+      <md-outlined-button id="btn-preview">预览请求</md-outlined-button>
+      <md-outlined-button id="btn-poll">立即轮询</md-outlined-button>
+      <md-outlined-button id="btn-flush">重试队列</md-outlined-button>
+      <md-outlined-button id="btn-log">查看日志</md-outlined-button>
+      <md-outlined-button id="btn-restart">重启守护进程</md-outlined-button>
+      <md-text-button id="refresh">刷新状态</md-text-button>
+    </section>
+
+    <section id="output-card" class="card" hidden>
+      <div class="output__head">
+        <h2 id="output-title" class="md-typescale-title-medium">输出</h2>
+        <md-text-button id="btn-clear-output">清空</md-text-button>
+      </div>
+      <pre id="output" class="output"></pre>
+    </section>
+  </main>
+
+  <div id="snackbar" class="snackbar md-typescale-body-medium" role="status" aria-live="polite" hidden></div>
+
+  <script src="vendor/material-web.min.js"></script>
+  <script src="headers.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

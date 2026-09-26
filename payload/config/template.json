@@ -1,0 +1,9 @@
+{
+  "device": "{{DEVICE_NAME}}",
+  "from": "{{FROM}}",
+  "content": "{{SMS}}",
+  "card_slot": "{{CARD_SLOT}}",
+  "card_subid": "{{CARD_SUBID}}",
+  "receive_time": "{{RECEIVE_TIME}}",
+  "timestamp": {{TIMESTAMP}}
+}

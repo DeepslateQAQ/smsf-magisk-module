@@ -1,0 +1,5 @@
+# shellcheck configuration for the module scripts.
+# SC2034: SMSFW_*/SMSF_* variables are consumed by other sourced files.
+# SC1091: config.conf is generated on device and not present in the repo.
+# SC3043: 'local' is supported by Android's mksh.
+disable=SC2034,SC1091,SC3043
